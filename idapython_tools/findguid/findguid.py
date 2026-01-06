@@ -23,7 +23,7 @@ except ModuleNotFoundError:
         if tif.get_type_by_tid(struct_tid):
             if tif.is_struct():
                 return tif
-        return ida_idapi.BADADDR
+        return ida_idaapi.BADADDR
     
     def get_member_by_name(tif, name):
         if not tif.is_struct():
