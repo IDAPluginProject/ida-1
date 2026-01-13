@@ -1,16 +1,23 @@
 import struct, copy
 import idc, idautils, ida_name, ida_bytes, ida_ua, ida_search
-from consts import non_sparse_consts, sparse_consts, operand_consts
+from consts import constant_arrays, constant_values
 
 if 'g_fc_prefix_cmt' not in globals():
-    g_fc_prefix_cmt = "FC: "
+    g_fc_prefix_cmt = 'FC: '
 if 'g_fc_prefix_var' not in globals():
-    g_fc_prefix_var = "FC_"
+    g_fc_prefix_var = 'FC_'
 
-if idc.BADADDR == 0xFFFFFFFF:
-    digits = 8
-else:
-    digits = 16
+s = ida_segment.getseg(idc.here())
+if s.bitness == 1:
+    bad_addr = 0xFFFFFFFF
+    address_format = '0x{:08X}'
+    get_value = ida_bytes.get_dword
+    value_len = 4
+elif s.bitness == 2:
+    bad_addr = 0xFFFFFFFFFFFFFFFF
+    address_format = '0x{:016X}'
+    get_value = ida_bytes.get_qword
+    value_len = 8
 
 def convert_to_byte_array(const, big_endian=False):
     byte_array = []
@@ -31,26 +38,27 @@ def convert_to_byte_array(const, big_endian=False):
     return byte_array
 
 def main():
-    print("[*] loading crypto constants")
-    non_sparse_consts2 = []
-    for const in non_sparse_consts:
+    print("[*] Loading crypto constants")
+    constant_arrays2 = []
+    for const in constant_arrays:
         const["byte_array"] = convert_to_byte_array(const)
-        non_sparse_consts2.append(const)
+        constant_arrays2.append(const)
         if const["size"] != "B":
             const = copy.copy(const)
             const["byte_array"] = convert_to_byte_array(const, big_endian=True)
-            non_sparse_consts2.append(const)
+            constant_arrays2.append(const)
 
-    for start in idautils.Segments():
-        print("[*] searching for crypto constants in %s" % idc.get_segm_name(start))
-        ea = start
-        while ea < idc.get_segm_end(start):
+    for seg_start in idautils.Segments():
+        print("[*] Searching for crypto constants in {}".format(idc.get_segm_name(seg_start)))
+        ea = seg_start
+        seg_end = idc.get_segm_end(seg_start)
+        while ea < seg_end:
             bbbb = list(struct.unpack("BBBB", idc.get_bytes(ea, 4)))
-            for const in non_sparse_consts2:
+            for const in constant_arrays2:
                 if bbbb != const["byte_array"][:4]:
                     continue
                 if list(map(lambda x:x if type(x) == int else ord(x), idc.get_bytes(ea, len(const["byte_array"])))) == const["byte_array"]:
-                    print(("0x%0" + str(digits) + "X: found const array %s (used in %s)") % (ea, const["name"], const["algorithm"]))
+                    print(("[*] " + address_format + ": Found const array {}.{}").format(ea, const["algorithm"], const["name"]))
                     idc.set_name(ea, g_fc_prefix_var + const["name"], ida_name.SN_FORCE)
                     if const["size"] == "B":
                         ida_bytes.del_items(ea, 0, len(const["array"]))
@@ -66,33 +74,35 @@ def main():
                     break
             ea += 4
 
-        ea = start
+        ea = seg_start
         if idc.get_segm_attr(ea, idc.SEGATTR_TYPE) == idc.SEG_CODE:
-            while ea < idc.get_segm_end(start):
+            while ea < seg_end:
                 d = ida_bytes.get_dword(ea)
-                for const in sparse_consts:
-                    if d != const["array"][0]:
+                for const in constant_arrays2:
+                    if d != int.from_bytes(const["byte_array"][:value_len], byteorder='little'):
                         continue
-                    tmp = ea + 4
-                    for val in const["array"][1:]:
-                        for i in range(8):
+
+                    tmp = ea + value_len
+                    for j in range(1, len(const["byte_array"])//value_len):
+                        val = int.from_bytes(const["byte_array"][value_len*j:value_len*j+value_len], byteorder='little')
+                        for i in range(1, 10):
                             if ida_bytes.get_dword(tmp + i) == val:
                                 tmp = tmp + i + 4
                                 break
                         else:
                             break
                     else:
-                        print(("0x%0" + str(digits) + "X: found sparse constants for %s") % (ea, const["algorithm"]))
+                        print(("[*] " + address_format + ": Found sparse constant {}.{}").format(ea, const["algorithm"], const["name"]))
                         cmt = idc.get_cmt(idc.prev_head(ea), 0)
-                        if cmt:
-                            idc.set_cmt(idc.prev_head(ea), cmt + ' ' + g_fc_prefix_cmt + const["name"], 0)
+                        if cmt and cmt != g_fc_prefix_cmt + const["name"]:
+                            idc.set_cmt(idc.prev_head(ea), cmt + '\n' + g_fc_prefix_cmt + const["name"], 0)
                         else:
                             idc.set_cmt(idc.prev_head(ea), g_fc_prefix_cmt + const["name"], 0)
                         ea = tmp
                         break
                 ea += 1
 
-    print("[*] searching for crypto constants in immediate operand")
+    print("[*] Searching for crypto constants in immediate operand")
     funcs = idautils.Functions()
     for f in funcs:
         flags = idc.get_func_flags(f)
@@ -111,9 +121,9 @@ def main():
                 if len(imm_operands) == 0:
                     ea = idc.find_code(ea, ida_search.SEARCH_DOWN)
                     continue
-                for const in operand_consts:
+                for const in constant_values:
                     if const["value"] in imm_operands:
-                        print(("0x%0" + str(digits) + "X: found immediate operand constants for %s") % (ea, const["algorithm"]))
+                        print(("[*] " + address_format + ": Found immediate operand constant {}.{}").format(ea, const["algorithm"], const["name"]))
                         cmt = idc.get_cmt(ea, 0)
                         if cmt:
                             idc.set_cmt(ea, cmt + ' ' + g_fc_prefix_cmt + const["name"], 0)
@@ -121,7 +131,7 @@ def main():
                             idc.set_cmt(ea, g_fc_prefix_cmt + const["name"], 0)
                         break
                 ea = idc.find_code(ea, ida_search.SEARCH_DOWN)
-    print("[*] finished")
+    print("[*] Finished")
 
 if __name__ == '__main__':
     main()
